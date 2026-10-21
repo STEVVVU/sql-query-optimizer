@@ -1,53 +1,55 @@
-# optd
+# Memoir: Cascades SQL optimizer laboratory
 
-optd (pronounced as op-dee) is a database optimizer framework. It is a cost-based optimizer that searches the plan space using the rules that the user defines and derives the optimal plan based on the cost model and the physical properties.
+Memoir preserves the complete [CMU optd-original](https://github.com/cmu-db/optd-original) implementation and Git history. The upstream supplies the optimizer; the additions here are a skewed SQL parity executable, retained memo/plan diagnostics, a reusable verification driver and credential-free CI. This studies the [CMU 15-721 Spring 2024 project showcase](https://15721.courses.cs.cmu.edu/spring2024/project-showcase.html), without claiming enrollment, authorship of optd, or course completion.
 
-The primary objective of optd is to explore the potential challenges involved in effectively implementing a cost-based optimizer for real-world production usage. optd implements the Columbia Cascades optimizer framework based on [Yongwen Xu's master's thesis](https://15721.courses.cs.cmu.edu/spring2019/papers/22-optimizer1/xu-columbia-thesis1998.pdf). Besides cascades, optd also provides a heuristics optimizer implementation for testing purpose.
+## Run
 
-The other key objective is to implement a flexible optimizer framework which supports adaptive query optimization (aka. reoptimization) and adaptive query execution. optd executes a query, captures runtime information, and utilizes this data to guide subsequent plan space searches and cost model estimations. This progressive optimization approach ensures that queries are continuously improved, and allows the optimizer to explore a large plan space.
+Install Rust 1.99.1 and native C/C++ build tools. The checked-in Cargo.lock fixes the archived graph. From this directory:
 
-Currently, optd is integrated into Apache Arrow Datafusion as a physical optimizer. It receives the logical plan from Datafusion, implements various physical optimizations (e.g., determining the join order), and subsequently converts it back into the Datafusion physical plan for execution.
-
-optd is a research project and is still evolving. It should not be used in production. The code is licensed under MIT.
-
-## Get Started
-
-There are three demos you can run with optd. More information available in the [docs](docs/).
-
-```
-cargo run --release --bin optd-adaptive-tpch-q8
-cargo run --release --bin optd-adaptive-three-join
+```sh
+cargo +1.99.1 run --locked -p optd-datafusion-bridge --example memoir -- evidence/memoir
 ```
 
-You can also run the Datafusion cli to interactively experiment with optd.
+The example seeds in-memory tables, parses real SQL, optimizes through the existing DataFusion bridge and Cascades engine, executes physical plans, and compares ordered results with an independent ordinary DataFusion session. It covers a filtered three-table join on skewed data, grouped aggregation and an empty result. Each query saves SQL, results, verbose plan and full costed memo. Failed parity or exploration returns a nonzero exit status.
 
+PowerShell 7 lifecycle:
+
+```powershell
+pwsh -File tools/verification/verify.ps1 Launch
+pwsh -File tools/verification/verify.ps1 Doctor
+pwsh -File tools/verification/verify.ps1 Drive
+pwsh -File tools/verification/verify.ps1 Evidence
+pwsh -File tools/verification/verify.ps1 Cleanup
+pwsh -File tools/verification/verify.ps1 Evidence
 ```
-cargo run --bin datafusion-optd-cli
+
+The driver uses two jobs and no debug symbols. Fixtures live inside the short-lived process; evidence survives cleanup. See [.agents/skills/verify-memoir](.agents/skills/verify-memoir/SKILL.md). The full upstream interactive CLI is retained: `cargo +1.99.1 run --locked --bin datafusion-optd-cli`; its larger dependency surface is outside the fixture acceptance check.
+
+## Mechanism map
+
+| Mechanism | Existing implementation | Acceptance evidence |
+| --- | --- | --- |
+| Memo groups, equivalent expressions, merging | optd-core/src/cascades/memo.rs | Core tests; memo expressions |
+| Cascades tasks, scheduling, pruning | optd-core/src/cascades/tasks2.rs and optimizer.rs | Costed physical winners and join alternatives |
+| Join commutation/association, filter movement | optd-datafusion-repr/src/rules | EXPLAIN alternatives and pushed filters |
+| Cardinality and compute/I/O estimates | optd-datafusion-repr/src/cost | Verbose costs and row counts |
+| Advanced statistics | optd-datafusion-repr-adv-cost and optd-gungnir | Preserved implementation, separate package tests |
+| Logical/physical properties | optd-core/src/physical_property.rs and tests/heuristics_physical_property.rs | Existing property enforcement tests |
+| SQL planning and physical execution | optd-datafusion-bridge/src | Three queries equal ordinary DataFusion |
+
+```sh
+cargo +1.99.1 test --locked -p optd-core --lib
+cargo +1.99.1 test --locked -p optd-datafusion-repr --lib
+cargo +1.99.1 fmt --all -- --check
+cargo +1.99.1 clippy --locked -p optd-datafusion-bridge --example memoir --no-deps
 ```
 
-You can also test the performance of the cost model with the "cardinality benchmarking" feature (more info in the [docs](docs/)).
-Before running this, you will need to manually run Postgres on your machine.
-Note that there is a CI script which tests this command (TPC-H with scale factor 0.01) before every merge into main, so it should be very reliable.
-```
-cargo run --release --bin optd-perfbench cardbench tpch --scale-factor 0.01
-```
+## Provenance and limits
 
-## Documentation
+Fork base: `c7f727f9e862beed6be5515eb2bb223d1c8bd8c3`. [README.upstream.md](README.upstream.md) is the unchanged original overview. MIT LICENSE and Apache notices in the vendored DataFusion CLI are preserved. The pinned graph uses DataFusion 43 and Arrow 53; the upstream overview's version-32 reference is historical. No replacement optimizer or new third-party package is introduced; the example adds a direct development reference to the already-locked Tokio runtime.
 
-The documentation is available in the mdbook format in the [docs](docs) directory.
+The default cost model uses fallback table estimates and does not infer fixture skew. The harness proves parity, exploration and cost-based selection, not optimal runtime or calibrated cardinality. Generic physical properties have unit coverage; the SQL fixture does not assert every sort/distribution property. Upstream is research software unsuitable for production. Adaptive behavior, all SQL/types, Postgres benchmarks and cloud object stores are not exhaustively verified. The documented acceptance path needs no database service, credentials, GPU or paid compute.
 
-## Structure
+The upstream bridge rewrites output field names (for example aliases become col0/col1, aggregates use generic names). Verification compares ordered typed values and expected row counts, retains separate actual/reference displays, and does not claim alias preservation. Empty results exercise zero rows; they do not prove physical schema equality when either engine emits no batches.
 
-* `datafusion-optd-cli`: The patched Apache Arrow Datafusion (version=32) cli that calls into optd.
-* `datafusion-optd-bridge`: Implementation of Apache Arrow Datafusion query planner as a bridge between optd and Apache Arrow Datafusion.
-* `optd-core`: The core framework of optd.
-* `optd-datafusion-repr`: Representation of Apache Arrow Datafusion plan nodes in optd.
-* `optd-adaptive-demo`: Demo of adaptive optimization capabilities of optd. More information available in the [docs](docs/).
-* `optd-sqlplannertest`: Planner test of optd based on [risinglightdb/sqlplannertest-rs](https://github.com/risinglightdb/sqlplannertest-rs).
-* `optd-gungnir`: Scalable, memory-efficient, and parallelizable statistical methods for cardinality estimation (e.g. TDigest, HyperLogLog).
-* `optd-perfbench`: A CLI program for benchmarking performance (cardinality, throughput, etc.) against other databases.
-
-
-# Related Works
-
-* [datafusion-dolomite](https://github.com/datafusion-contrib/datafusion-dolomite)
+The new example denies Clippy warnings in its source. The no-deps Clippy command reports inherited bridge warnings; strict workspace Clippy on Rust 1.99.1 also fails on pre-existing upstream lints. The original upstream CI is preserved; the separate Memoir workflow exercises the local SQL acceptance path.

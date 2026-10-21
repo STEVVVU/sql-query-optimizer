@@ -3432,6 +3432,7 @@ dependencies = [
  "optd-core",
  "optd-datafusion-repr",
  "optd-datafusion-repr-adv-cost",
+ "tokio",
  "tracing",
 ]
 

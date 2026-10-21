@@ -1,0 +1,3 @@
+# Repository instructions
+
+Preserve the complete upstream optimizer and licenses. Keep coursework additions focused on diagnostic SQL, verification and documentation; reuse existing rules/memo/cost APIs. Rust toolchain for the documented acceptance path is 1.99.1 with Cargo.lock. Use two build jobs and debug=0 on constrained machines. Run the project verify-memoir skill for SQL behavior, core/representation tests for mechanism coverage, rustfmt and scoped clippy. Never commit target/ or evidence/ artifacts. The full interactive CLI/cloud/Postgres workloads are retained upstream surfaces outside the local fixture driver; state any unexecuted checks accurately.
