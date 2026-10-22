@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt
       - name: Existing static and completeness checks
         run: |
           cargo +1.99.1 fmt --all -- --check
