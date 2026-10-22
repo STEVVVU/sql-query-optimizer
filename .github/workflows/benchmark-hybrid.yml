@@ -1,0 +1,45 @@
+name: Labeled optimizer hybrid comparison
+on:
+  workflow_dispatch:
+    inputs:
+      smoke:
+        type: boolean
+        default: true
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: 2
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Existing static and completeness checks
+        run: |
+          cargo +1.99.1 fmt --all -- --check
+          python3 tools/verification/test_benchmark_summary.py
+          cargo +1.99.1 build --release --locked -p optd-datafusion-bridge --example memoir --jobs 2
+      - name: Record exact compiler and configuration
+        run: |
+          mkdir -p evidence/hybrid
+          { git rev-parse HEAD; rustc +1.99.1 -Vv; cargo +1.99.1 -V; uname -a; lscpu; free -b; df -B1 .; uptime; sha256sum target/release/examples/memoir; } > evidence/hybrid/environment.txt
+          test "$(df --output=avail -B1 . | tail -1)" -gt 10737418240
+      - name: Differential typed values and complete execution
+        env:
+          SMOKE: ${{ inputs.smoke }}
+        run: |
+          if [ "$SMOKE" = true ]; then
+            timeout 300 target/release/examples/memoir --benchmark-hybrid evidence/hybrid/smoke 1000 1
+          else
+            for size in 1000 100000 1000000; do
+              /usr/bin/time -v -o evidence/hybrid/resource-$size.txt timeout 300 target/release/examples/memoir --benchmark-hybrid evidence/hybrid/rows-$size "$size" 5
+            done
+            python3 tools/verification/summarize_benchmark.py evidence/hybrid --hybrid
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optimizer-hybrid-${{ github.run_id }}
+          path: evidence/hybrid

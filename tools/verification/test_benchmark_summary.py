@@ -19,6 +19,12 @@ class CompletenessTest(unittest.TestCase):
             validate_complete(duplicate)
         with self.assertRaises(ValueError):
             validate_complete(rows[:60])
+        hybrid = rows + [dict(row, side="optd_df_logical") for row in rows if row["side"] == "optd"]
+        validate_complete(hybrid, hybrid=True)
+        with self.assertRaises(ValueError):
+            validate_complete(hybrid)
+        with self.assertRaises(ValueError):
+            validate_complete(rows, hybrid=True)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
 """Summarize retained paired samples without selecting or dropping regressions."""
+import argparse
 import csv
 import hashlib
 import json
 from pathlib import Path
 import re
 import statistics
-import sys
 
 
 def q_error(estimate, actual):
@@ -35,8 +35,9 @@ def summarize(rows):
     return output
 
 
-def validate_complete(rows, sizes=(1000,100000,1000000), repeats=5):
-    expected = {(str(size),query,side) for size in sizes for query in ["skewed_join","aggregate","selective_join","scan","empty"] for side in ["optd","datafusion"]}
+def validate_complete(rows, sizes=(1000,100000,1000000), repeats=5, hybrid=False):
+    sides = ["optd","datafusion","optd_df_logical"] if hybrid else ["optd","datafusion"]
+    expected = {(str(size),query,side) for size in sizes for query in ["skewed_join","aggregate","selective_join","scan","empty"] for side in sides}
     groups = {}
     for row in rows:
         key = (row["orders"],row["query"],row["side"])
@@ -63,7 +64,11 @@ except ValueError:
     pass
 
 if __name__ == "__main__":
-    root = Path(sys.argv[1])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("root", type=Path)
+    parser.add_argument("--hybrid", action="store_true")
+    args = parser.parse_args()
+    root = args.root
     rows = []
     hashes = {}
     for path in sorted(root.glob("rows-*/samples.csv")):
@@ -76,6 +81,6 @@ if __name__ == "__main__":
                 hashes[str(artifact.relative_to(root))] = hashlib.sha256(artifact.read_bytes()).hexdigest()
     if not rows:
         raise RuntimeError("no benchmark samples")
-    validate_complete(rows)
-    result = {"summary":summarize(rows),"artifact_sha256":hashes,"policy":"All 30 expected groups require exactly five measured repeats plus one warmup. All samples retained. Warmup excluded. Root plan estimates are distinct from optd internal estimates in verbose EXPLAIN. Q-error is undefined for nonmatching zero estimates/actuals or absent statistics. No speedup verdict without separate source-level profile and generator/resource review."}
+    validate_complete(rows, hybrid=args.hybrid)
+    result = {"hybrid_arm":args.hybrid,"summary":summarize(rows),"artifact_sha256":hashes,"policy":"All expected groups (30 standalone, 45 with explicitly requested hybrid arm) require exactly five measured repeats plus one warmup. All samples retained. Warmup excluded. Root plan estimates are distinct from optd internal estimates in verbose EXPLAIN. Q-error is undefined for nonmatching zero estimates/actuals or absent statistics. No speedup verdict without separate source-level profile and generator/resource review."}
     (root/"summary.json").write_text(json.dumps(result,indent=2)+"\n")

@@ -78,8 +78,10 @@ fn seed(ctx: &SessionContext, order_count: i64) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("--benchmark") {
-        return benchmark().await;
+    match std::env::args().nth(1).as_deref() {
+        Some("--benchmark") => return benchmark(false).await,
+        Some("--benchmark-hybrid") => return benchmark(true).await,
+        _ => {}
     }
     let evidence = PathBuf::from(
         std::env::args_os()
@@ -201,7 +203,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn benchmark() -> Result<()> {
+async fn benchmark(hybrid: bool) -> Result<()> {
     use datafusion::physical_plan::{collect, display::DisplayableExecutionPlan};
     use datafusion::prelude::SessionConfig;
     use std::io::Write;
@@ -209,7 +211,7 @@ async fn benchmark() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     ensure!(
         args.len() == 5,
-        "usage: memoir --benchmark OUTPUT ORDERS REPEATS"
+        "usage: memoir --benchmark[-hybrid] OUTPUT ORDERS REPEATS"
     );
     let evidence = PathBuf::from(&args[2]);
     let count = args[3].parse::<i64>()?;
@@ -224,6 +226,10 @@ async fn benchmark() -> Result<()> {
     );
     ensure!(!evidence.exists(), "evidence directory must be new");
     std::fs::create_dir_all(&evidence)?;
+    std::fs::write(
+        evidence.join("configuration.txt"),
+        format!("hybrid_arm={hybrid}\noptd=standalone logical/Cascades pipeline\noptd_df_logical=DataFusion logical prepass then optd physical/Cascades pipeline\ndatafusion=default DataFusion optimizer\npartitions=4\nbatch_size=8192\n"),
+    )?;
     let queries = [
         ("skewed_join", "SELECT o.id, c.id AS customer, r.id AS region FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions r ON c.region_id = r.id WHERE r.active = 1 AND o.amount > 90 ORDER BY o.id"),
         ("aggregate", "SELECT c.region_id, COUNT(*) AS n, SUM(o.amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions r ON c.region_id = r.id WHERE r.active = 1 GROUP BY c.region_id ORDER BY c.region_id"),
@@ -236,7 +242,10 @@ async fn benchmark() -> Result<()> {
     for (name, sql) in queries {
         std::fs::write(evidence.join(format!("{name}.sql")), sql)?;
         for repeat in 0..=repeats {
-            let mut sides = ["optd", "datafusion"];
+            let mut sides = vec!["optd", "datafusion"];
+            if hybrid {
+                sides.push("optd_df_logical");
+            }
             if repeat % 2 == 1 {
                 sides.reverse();
             }
@@ -245,14 +254,14 @@ async fn benchmark() -> Result<()> {
                 let config = SessionConfig::new()
                     .with_target_partitions(4)
                     .with_batch_size(8192);
-                let optd = if side == "optd" {
+                let optd = if side != "datafusion" {
                     Some(
                         create_df_context(
                             Some(config.clone()),
                             None,
                             None,
                             false,
-                            false,
+                            side == "optd_df_logical",
                             false,
                             None,
                         )
@@ -309,7 +318,7 @@ async fn benchmark() -> Result<()> {
                             .collect()
                             .await?;
                         std::fs::write(
-                            evidence.join(format!("{name}.optd.explain.txt")),
+                            evidence.join(format!("{name}.{side}.explain.txt")),
                             pretty_format_batches(&explain)?.to_string(),
                         )?;
                     }
