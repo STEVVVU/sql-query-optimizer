@@ -272,13 +272,19 @@ async fn benchmark() -> Result<()> {
                 let execution = execute.elapsed().as_micros();
                 let total = start.elapsed().as_micros();
                 let values = rows(&actual)?;
-                if let Some(expected) = &expected {
+                let types = plan
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.data_type().clone())
+                    .collect::<Vec<_>>();
+                if let Some((expected_values, expected_types)) = &expected {
                     ensure!(
-                        &values == expected,
+                        (&values, &types) == (expected_values, expected_types),
                         "{name}: result mismatch on repeat {repeat}"
                     );
                 } else {
-                    expected = Some(values.clone());
+                    expected = Some((values.clone(), types));
                 }
                 let row_count = values.len();
                 let estimate = format!("{:?}", plan.statistics()?.num_rows);
