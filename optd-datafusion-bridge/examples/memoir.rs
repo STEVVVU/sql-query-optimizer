@@ -48,7 +48,7 @@ fn table(columns: Vec<(&str, Vec<i64>)>) -> Result<Arc<MemTable>> {
     )?))
 }
 
-fn seed(ctx: &SessionContext) -> Result<()> {
+fn seed(ctx: &SessionContext, order_count: i64) -> Result<()> {
     ctx.register_table(
         "customers",
         table(vec![
@@ -59,14 +59,14 @@ fn seed(ctx: &SessionContext) -> Result<()> {
     ctx.register_table(
         "orders",
         table(vec![
-            ("id", (0..1000).collect()),
+            ("id", (0..order_count).collect()),
             (
                 "customer_id",
-                (0..1000)
-                    .map(|i| if i < 800 { 0 } else { i % 20 })
+                (0..order_count)
+                    .map(|i| if i < order_count * 8 / 10 { 0 } else { i % 20 })
                     .collect(),
             ),
-            ("amount", (0..1000).map(|i| i % 100).collect()),
+            ("amount", (0..order_count).map(|i| i % 100).collect()),
         ])?,
     )?;
     ctx.register_table(
@@ -78,6 +78,9 @@ fn seed(ctx: &SessionContext) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--benchmark") {
+        return benchmark().await;
+    }
     let evidence = PathBuf::from(
         std::env::args_os()
             .nth(1)
@@ -90,8 +93,8 @@ async fn main() -> Result<()> {
     }
     let optd = create_df_context(None, None, None, false, false, false, None).await?;
     let reference = SessionContext::new();
-    seed(&optd.ctx)?;
-    seed(&reference)?;
+    seed(&optd.ctx, 1000)?;
+    seed(&reference, 1000)?;
     let queries = [
         ("skewed_join", "SELECT o.id, c.id AS customer, r.id AS region FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions r ON c.region_id = r.id WHERE r.active = 1 AND o.amount > 90 ORDER BY o.id"),
         ("aggregate", "SELECT c.region_id, COUNT(*) AS n, SUM(o.amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions r ON c.region_id = r.id WHERE r.active = 1 GROUP BY c.region_id ORDER BY c.region_id"),
@@ -195,5 +198,122 @@ async fn main() -> Result<()> {
         println!("PASS {name}: SQL result parity; {join_alternatives} logical join orders; costed memo retained");
     }
     std::fs::write(evidence.join("summary.txt"), "PASS: 3 SQL queries match DataFusion reference; plans and costed memo retained.\nFixture: orders=1000 (80% customer 0), customers=20, regions=4.\nNo timing or cost-improvement claim; default cost model uses estimates.\n")?;
+    Ok(())
+}
+
+async fn benchmark() -> Result<()> {
+    use datafusion::physical_plan::{collect, display::DisplayableExecutionPlan};
+    use datafusion::prelude::SessionConfig;
+    use std::io::Write;
+    use std::time::Instant;
+    let args = std::env::args().collect::<Vec<_>>();
+    ensure!(
+        args.len() == 5,
+        "usage: memoir --benchmark OUTPUT ORDERS REPEATS"
+    );
+    let evidence = PathBuf::from(&args[2]);
+    let count = args[3].parse::<i64>()?;
+    let repeats = args[4].parse::<usize>()?;
+    ensure!(
+        (1..=1_000_000).contains(&count),
+        "orders must be 1..1000000"
+    );
+    ensure!(
+        (1..=20).contains(&repeats),
+        "repeats must be 1..20; use at least five for reported comparisons"
+    );
+    ensure!(!evidence.exists(), "evidence directory must be new");
+    std::fs::create_dir_all(&evidence)?;
+    let queries = [
+        ("skewed_join", "SELECT o.id, c.id AS customer, r.id AS region FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions r ON c.region_id = r.id WHERE r.active = 1 AND o.amount > 90 ORDER BY o.id"),
+        ("aggregate", "SELECT c.region_id, COUNT(*) AS n, SUM(o.amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions r ON c.region_id = r.id WHERE r.active = 1 GROUP BY c.region_id ORDER BY c.region_id"),
+        ("selective_join", "SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id = 1 ORDER BY o.id"),
+        ("scan", "SELECT SUM(amount) AS total, COUNT(*) AS n FROM orders"),
+        ("empty", "SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.amount > 1000 ORDER BY o.id"),
+    ];
+    let mut samples = std::fs::File::create(evidence.join("samples.csv"))?;
+    writeln!(samples, "query,side,repeat,warmup,orders,planning_us,execution_us,total_us,rows,estimated_root_rows")?;
+    for (name, sql) in queries {
+        std::fs::write(evidence.join(format!("{name}.sql")), sql)?;
+        for repeat in 0..=repeats {
+            let mut sides = ["optd", "datafusion"];
+            if repeat % 2 == 1 {
+                sides.reverse();
+            }
+            let mut expected = None;
+            for side in sides {
+                let config = SessionConfig::new()
+                    .with_target_partitions(4)
+                    .with_batch_size(8192);
+                let optd = if side == "optd" {
+                    Some(
+                        create_df_context(
+                            Some(config.clone()),
+                            None,
+                            None,
+                            false,
+                            false,
+                            false,
+                            None,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let reference = SessionContext::new_with_config(config);
+                let ctx = optd.as_ref().map_or(&reference, |optd| &optd.ctx);
+                seed(ctx, count)?;
+                let start = Instant::now();
+                let plan = ctx.sql(sql).await?.create_physical_plan().await?;
+                let planning = start.elapsed().as_micros();
+                let execute = Instant::now();
+                let actual = collect(plan.clone(), ctx.task_ctx()).await?;
+                let execution = execute.elapsed().as_micros();
+                let total = start.elapsed().as_micros();
+                let values = rows(&actual)?;
+                if let Some(expected) = &expected {
+                    ensure!(
+                        &values == expected,
+                        "{name}: result mismatch on repeat {repeat}"
+                    );
+                } else {
+                    expected = Some(values.clone());
+                }
+                let row_count = values.len();
+                let estimate = format!("{:?}", plan.statistics()?.num_rows);
+                writeln!(samples, "{name},{side},{repeat},{},{count},{planning},{execution},{total},{row_count},{estimate}", repeat == 0)?;
+                samples.flush()?;
+                if repeat == 0 {
+                    std::fs::write(
+                        evidence.join(format!("{name}.{side}.plan.txt")),
+                        DisplayableExecutionPlan::with_metrics(plan.as_ref())
+                            .indent(true)
+                            .to_string(),
+                    )?;
+                    std::fs::write(
+                        evidence.join(format!("{name}.{side}.rows.txt")),
+                        format!("{values:?}"),
+                    )?;
+                    if let Some(optd) = &optd {
+                        let explain = optd
+                            .ctx
+                            .sql(&format!("EXPLAIN VERBOSE {sql}"))
+                            .await?
+                            .collect()
+                            .await?;
+                        std::fs::write(
+                            evidence.join(format!("{name}.optd.explain.txt")),
+                            pretty_format_batches(&explain)?.to_string(),
+                        )?;
+                    }
+                }
+            }
+        }
+        println!(
+            "PASS benchmark {name} orders={count} repeats={repeats}: identical typed row values"
+        );
+    }
+    std::fs::write(evidence.join("passed.txt"), "All paired results matched. Warmup is repeat 0. Fixture construction and result conversion are outside timers. Planning plus execution is the in-memory consumer path.\n")?;
     Ok(())
 }

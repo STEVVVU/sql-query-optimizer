@@ -1,0 +1,36 @@
+name: Benchmark
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: 2
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Ensure syscall profiler is available
+        run: command -v strace || { sudo apt-get update && sudo apt-get install -y strace; }
+      - run: cargo build --release --locked -p optd-datafusion-bridge --example memoir --jobs 2
+      - run: python3 tools/verification/test_benchmark_summary.py
+      - name: Record environment
+        run: |
+          mkdir -p evidence/benchmark
+          { git rev-parse HEAD; rustc -Vv; cargo -V; uname -a; lscpu; free -b; df -B1 .; uptime; sha256sum target/release/examples/memoir; } > evidence/benchmark/environment.txt
+          test "$(df --output=avail -B1 . | tail -1)" -gt 10737418240
+      - name: Interleaved paired SQL sweep
+        run: |
+          for size in 1000 100000 1000000; do
+            /usr/bin/time -v -o evidence/benchmark/resource-$size.txt timeout 300 target/release/examples/memoir --benchmark evidence/benchmark/rows-$size "$size" 5
+          done
+          python3 tools/verification/summarize_benchmark.py evidence/benchmark
+      - name: Separate diagnostic profile
+        run: strace -f -c -o evidence/benchmark/profile.strace timeout 300 target/release/examples/memoir --benchmark evidence/benchmark/profile 100000 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optimizer-benchmark-${{ github.run_id }}
+          path: evidence/benchmark
