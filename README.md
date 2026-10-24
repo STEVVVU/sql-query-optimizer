@@ -2,6 +2,119 @@
 
 This project preserves the complete [CMU optd-original](https://github.com/cmu-db/optd-original) implementation and Git history. The upstream supplies the optimizer; the additions here are a skewed SQL parity executable, retained memo/plan diagnostics, a reusable verification driver and credential-free CI. This studies the [CMU 15-721 Spring 2024 project showcase](https://15721.courses.cs.cmu.edu/spring2024/project-showcase.html), without claiming enrollment, authorship of optd, or course completion.
 
+## Contents
+
+- [Run](#run)
+- [Architecture and execution guide](#architecture-and-execution-guide)
+- [Mechanism map](#mechanism-map)
+- [Provenance and limits](#provenance-and-limits)
+- [Reproduce optimizer measurements](#reproduce-optimizer-measurements)
+
+## Architecture and execution guide
+
+The retained workspace supplies the optimizer and DataFusion integration. The local `memoir` example adds fixture setup, result parity, retained diagnostics, and an explicit hybrid comparison. DataFusion parses and executes SQL; optd searches for a physical plan. The hybrid arm keeps DataFusion's logical optimizer before optd, including filter propagation for selective joins. The skewed fixture does not make fallback cost estimates skew-aware.
+
+The first diagram shows the example boundary. Both optimized and reference queries execute through DataFusion.
+
+```mermaid
+flowchart LR
+  N1["SQL and fixture tables"] --> N2["DataFusion session"]
+  N2["DataFusion session"] --> N3["optd bridge and Cascades"]
+  N2 --> Hybrid["Optional DataFusion logical prepass"]
+  Hybrid --> N3
+  N2["DataFusion session"] --> N4["Reference planner"]
+  N3["optd bridge and Cascades"] --> N5["DataFusion execution"]
+  N4["Reference planner"] --> N5["DataFusion execution"]
+  N5["DataFusion execution"] --> N6["Ordered result parity and evidence"]
+```
+
+The inner flow converts supported plans to optd, explores alternatives, and converts a winner back. DDL, DML, and empty relations fall back to DataFusion's planner.
+
+```mermaid
+flowchart TD
+  subgraph bridge["DataFusion bridge"]
+    N1["Logical plan"] --> N2["Convert to optd"]
+    N3["Convert winner back"] --> N4["Physical planning"]
+  end
+  subgraph cascades["Cascades search"]
+    N5["Seed memo"] --> N6["Explore logical rules"]
+    N6["Explore logical rules"] --> N7["Implement physical expressions"]
+    N7["Implement physical expressions"] --> N8["Cost candidates and check properties"]
+    N8["Cost candidates and check properties"] --> N9["Select group winners"]
+  end
+  N1["Logical plan"] -->|"DDL, DML, or empty relation"| N10["DataFusion fallback"]
+  N2["Convert to optd"] --> N5["Seed memo"]
+  N9["Select group winners"] --> N3["Convert winner back"]
+```
+
+| Subsystem | Responsibility and owned state | Source |
+| --- | --- | --- |
+| Bridge | Converts DataFusion plans and catalog schemas to optd, then returns a DataFusion physical plan. | [`lib.rs`](optd-datafusion-bridge/src/lib.rs), [`into_optd.rs`](optd-datafusion-bridge/src/into_optd.rs), [`from_optd.rs`](optd-datafusion-bridge/src/from_optd.rs) |
+| Memo and task runner | Holds equivalent expressions, exploration state, and candidate winners; budgets limit rule expansion. | [`memo.rs`](optd-core/src/cascades/memo.rs), [`tasks2.rs`](optd-core/src/cascades/tasks2.rs), [`optimizer.rs`](optd-core/src/cascades/optimizer.rs) |
+| Rules and cost | Defines rewrites, implementations, and estimates used to rank alternatives. | [`rules`](optd-datafusion-repr/src/rules), [`cost`](optd-datafusion-repr/src/cost) |
+| Properties | Tracks logical facts and physical requirements during plan selection. | [`physical_property.rs`](optd-core/src/physical_property.rs), [`logical_property.rs`](optd-core/src/logical_property.rs) |
+| Example | Creates fixtures and retains SQL, results, plans, and the costed memo. | [`memoir.rs`](optd-datafusion-bridge/examples/memoir.rs) |
+| Hybrid comparison | Retains DataFusion logical rules before optd physical planning when `use_df_logical` is enabled. | [`create_df_context`](optd-datafusion-bridge/src/lib.rs), [`benchmark`](optd-datafusion-bridge/examples/memoir.rs) |
+
+Execution journey:
+
+1. The example registers in-memory tables and submits SQL to DataFusion.
+2. The default arm disables DataFusion logical rules. The explicit hybrid arm retains those rules before the bridge converts supported nodes and fields. Unsupported conversions fail; DDL, DML, and empty relations use the default planner.
+3. Cascades stores alternatives in a [memo group](#memo-group), applies logical rewrites and [implementation rules](#implementation-rule), then selects winners using costs and [physical properties](#physical-property).
+4. The bridge converts the winner to a DataFusion plan, which executes it. A separate DataFusion session provides the reference result.
+5. The example compares ordered typed results and saves the plan and memo. Conversion, exploration, execution, or parity errors fail the run.
+
+| Choice | Current implementation and rationale inferred from code | Alternative and cost to reconsider |
+| --- | --- | --- |
+| Keep DataFusion as parser and executor | optd changes search while DataFusion retains catalog and execution behavior. | A separate executor gives control but duplicates operator semantics. |
+| Store alternatives in memo groups | Equivalent plans share group identity and winner state. | Tree rewriting is easier to inspect but does not share alternatives or winner state. |
+| Budget exploration | Task counters and configured budgets bound logical expansion. | Exhaustive search can add alternatives at greater search and memory cost. |
+| Rank with a cost model | Candidate selection uses estimates; fixture skew is not inferred. | Runtime feedback may improve estimates but requires workload data and more validation. |
+| Compare with an independent session | Ordered typed parity checks behavior without asserting plan quality. | Golden results are simpler but can miss engine-dependent output differences. |
+| Keep the hybrid arm explicit | Reuses DataFusion logical rewrites while retaining optd physical search. | Standalone optd isolates its rules, but can miss filter propagation and process more join rows. The measured benefit depends on the query. |
+
+These are implementation tradeoffs, not recorded historical intent. The fixture proves parity and exploration, not optimal plans or production readiness.
+
+<a id="memo-group"></a>
+
+<details><summary>What is a memo group?</summary>
+
+A memo group holds expressions that represent equivalent relational results. Cascades shares alternatives in groups so it can compare implementations. The example retains the full costed memo.
+
+</details>
+
+<a id="implementation-rule"></a>
+
+<details><summary>What is an implementation rule?</summary>
+
+An implementation rule maps a logical expression to a physical operator candidate. The task runner applies these after logical exploration.
+
+</details>
+
+<a id="physical-property"></a>
+
+<details><summary>What is a physical property?</summary>
+
+A physical property describes a requirement such as ordering or distribution. optd tracks these when selecting winners; the SQL fixture does not exercise every property.
+
+</details>
+
+<a id="logical-property"></a>
+
+<details><summary>What is a logical property?</summary>
+
+A logical property records facts about a relational result for use by rules. Property inference coverage depends on the plan and supported types.
+
+</details>
+
+<a id="cost-model"></a>
+
+<details><summary>What is a cost model?</summary>
+
+A cost model estimates relative plan expense. The example uses fallback table estimates and does not infer its skewed fixture distribution.
+
+</details>
+
 ## Run
 
 Install Rust 1.99.1 and native C/C++ build tools. The checked-in Cargo.lock fixes the archived graph. From this directory:
