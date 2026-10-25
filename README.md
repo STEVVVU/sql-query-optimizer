@@ -13,9 +13,40 @@ This project preserves the complete [CMU optd-original](https://github.com/cmu-d
 
 ## Architecture and execution guide
 
+### Subsystem map
+
+Select a subsystem in the diagram to open its techniques, tradeoffs, and code references. The numbered links provide the same navigation. This map groups components; the execution diagrams show their runtime flow.
+
+```mermaid
+flowchart LR
+  system["SQL query optimizer"]
+  system --> s1["1. Memo representation"]
+  click s1 href "https://github.com/STEVVVU/sql-query-optimizer#subsystem-memo-representation" "Explore Memo representation" _top
+  system --> s2["2. Cascades search and budgeting"]
+  click s2 href "https://github.com/STEVVVU/sql-query-optimizer#subsystem-cascades-search-and-budgeting" "Explore Cascades search and budgeting" _top
+  system --> s3["3. Relational rewrites and<br/>implementation"]
+  click s3 href "https://github.com/STEVVVU/sql-query-optimizer#subsystem-relational-rewrites-and-implementation" "Explore Relational rewrites and implementation" _top
+  system --> s4["4. Cost and properties"]
+  click s4 href "https://github.com/STEVVVU/sql-query-optimizer#subsystem-cost-and-properties" "Explore Cost and properties" _top
+  system --> s5["5. DataFusion bridge and hybrid<br/>planner"]
+  click s5 href "https://github.com/STEVVVU/sql-query-optimizer#subsystem-datafusion-bridge-and-hybrid-planner" "Explore DataFusion bridge and hybrid planner" _top
+  system --> s6["6. Memoir fixture and parity<br/>driver"]
+  click s6 href "https://github.com/STEVVVU/sql-query-optimizer#subsystem-memoir-fixture-and-parity-driver" "Explore Memoir fixture and parity driver" _top
+```
+
+1. [Memo representation](#subsystem-memo-representation)
+2. [Cascades search and budgeting](#subsystem-cascades-search-and-budgeting)
+3. [Relational rewrites and implementation](#subsystem-relational-rewrites-and-implementation)
+4. [Cost and properties](#subsystem-cost-and-properties)
+5. [DataFusion bridge and hybrid planner](#subsystem-datafusion-bridge-and-hybrid-planner)
+6. [Memoir fixture and parity driver](#subsystem-memoir-fixture-and-parity-driver)
+
 The retained workspace supplies the optimizer and DataFusion integration. The local `memoir` example adds fixture setup, result parity, retained diagnostics, and an explicit hybrid comparison. DataFusion parses and executes SQL; optd searches for a physical plan. The hybrid arm keeps DataFusion's logical optimizer before optd, including filter propagation for selective joins. The skewed fixture does not make fallback cost estimates skew-aware.
 
 The first diagram shows the example boundary. Both optimized and reference queries execute through DataFusion.
+
+<details>
+<summary>Expand flow diagram 1</summary>
 
 ```mermaid
 flowchart LR
@@ -29,7 +60,12 @@ flowchart LR
   N5["DataFusion execution"] --> N6["Ordered result parity and evidence"]
 ```
 
+</details>
+
 The inner flow converts supported plans to optd, explores alternatives, and converts a winner back. DDL, DML, and empty relations fall back to DataFusion's planner.
+
+<details>
+<summary>Expand flow diagram 2</summary>
 
 ```mermaid
 flowchart TD
@@ -47,6 +83,8 @@ flowchart TD
   N2["Convert to optd"] --> N5["Seed memo"]
   N9["Select group winners"] --> N3["Convert winner back"]
 ```
+
+</details>
 
 | Subsystem | Responsibility and owned state | Source |
 | --- | --- | --- |
@@ -120,6 +158,9 @@ A cost model estimates relative plan expense. The example uses fallback table es
 
 Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and fixture driver. Rationale is inferred from current code, not historical author intent.
 
+<details>
+<summary>Full technique index</summary>
+
 | Active subsystem | Techniques | Source files |
 | --- | --- | --- |
 | Memo representation | [Cascades memo groups and expression sharing](#technique-cascades-memo) | [`memo.rs`](optd-core/src/cascades/memo.rs) |
@@ -129,21 +170,19 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 | DataFusion bridge and hybrid planner | [DataFusion and optd plan conversion](#technique-datafusion-optd-plan-conversion), [DataFusion logical-prepass hybrid](#technique-datafusion-logical-prepass) | [`lib.rs`](optd-datafusion-bridge/src/lib.rs), [`into_optd.rs`](optd-datafusion-bridge/src/into_optd.rs), [`from_optd.rs`](optd-datafusion-bridge/src/from_optd.rs) |
 | Memoir fixture and parity driver | [DataFusion logical-prepass hybrid](#technique-datafusion-logical-prepass), [Ordered typed result parity verification](#technique-result-parity-and-plan-evidence) | [`memoir.rs`](optd-datafusion-bridge/examples/memoir.rs) |
 
-<a id="technique-expression-and-operator-simplification"></a>
-
-<details>
-<summary>Predicate and redundant-operator simplification</summary>
-
-**Mechanism.** Filter rules simplify boolean predicates and remove filters that become true. Separate rules remove limits with no effective skip or fetch and collapse duplicated sort or aggregate expressions.
-
-**Example.** A filter whose simplified condition is `TRUE` can be removed; a no-op limit can return its child plan.
-
-**Why here.** These rewrites reduce redundant logical work before Cascades chooses physical operators.
-
-**Tradeoffs.** Each rule handles specific expression and operator shapes. Simplification does not replace general theorem proving or constant folding across unsupported expression forms.
-
-**Code and ownership.** [`optd-datafusion-repr/src/rules/filter.rs#L94`](optd-datafusion-repr/src/rules/filter.rs#L94) (`apply_simplify_filter`); [`optd-datafusion-repr/src/rules/eliminate_limit.rs#L22`](optd-datafusion-repr/src/rules/eliminate_limit.rs#L22) (`apply_eliminate_limit`); [`optd-datafusion-repr/src/rules/eliminate_duplicated_expr.rs#L79`](optd-datafusion-repr/src/rules/eliminate_duplicated_expr.rs#L79) (`apply_eliminate_duplicated_agg_expr`). Origin: inherited.
 </details>
+
+<a id="subsystem-memo-representation"></a>
+
+### 1. Memo representation
+
+[Back to the subsystem map](#architecture-and-execution-guide).
+
+**Code.** [`optd-core/src/cascades/memo.rs`](optd-core/src/cascades/memo.rs).
+
+**Techniques.** [Cascades memo groups and expression sharing](#technique-cascades-memo).
+
+**Related concepts.** [memo group](#memo-group).
 
 <a id="technique-cascades-memo"></a>
 
@@ -159,7 +198,23 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** The search compares alternatives without copying each full tree. Group merging repairs indexes and can recursively merge duplicate groups.
 
 **Code and ownership.** [`optd-core/src/cascades/memo.rs#L24`](optd-core/src/cascades/memo.rs#L24) (`MemoPlanNode`). Origin: inherited.
+
+
+**Used in.** [Memo representation](#subsystem-memo-representation). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
+
+<a id="subsystem-cascades-search-and-budgeting"></a>
+
+### 2. Cascades search and budgeting
+
+[Back to the subsystem map](#architecture-and-execution-guide).
+
+**Code.** [`optd-core/src/cascades/tasks2.rs`](optd-core/src/cascades/tasks2.rs), [`optd-core/src/cascades/optimizer.rs`](optd-core/src/cascades/optimizer.rs).
+
+**Techniques.** [Cascades rule exploration and implementation](#technique-cascades-rule-exploration), [Rule exploration budgets](#technique-search-budget-gates), [Cost and row-estimate winner selection](#technique-cost-based-winner-selection).
+
+**Related concepts.** [implementation rule](#implementation-rule).
 
 <a id="technique-cascades-rule-exploration"></a>
 
@@ -175,6 +230,10 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** Exploration can grow the memo. This is sequential task execution, not parallel search; recursive search uses a grown stack.
 
 **Code and ownership.** [`optd-core/src/cascades/tasks2.rs#L139`](optd-core/src/cascades/tasks2.rs#L139) (`optimize_expr_inner`); [`optd-core/src/cascades/tasks2.rs#L235`](optd-core/src/cascades/tasks2.rs#L235) (`apply_rule_inner`). Origin: inherited.
+
+
+**Used in.** [Cascades search and budgeting](#subsystem-cascades-search-and-budgeting). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
 
 <a id="technique-search-budget-gates"></a>
@@ -191,70 +250,10 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** A capped search may omit a cheaper alternative. The fixture uses project defaults and does not claim exhaustive search.
 
 **Code and ownership.** [`optd-core/src/cascades/optimizer.rs#L41`](optd-core/src/cascades/optimizer.rs#L41) (`OptimizerProperties`); [`optd-core/src/cascades/tasks2.rs#L235`](optd-core/src/cascades/tasks2.rs#L235) (`apply_rule_inner`). Origin: inherited.
-</details>
 
-<a id="technique-join-order-rewrites"></a>
 
-<details>
-<summary>Join commutation and association</summary>
+**Used in.** [Cascades search and budgeting](#subsystem-cascades-search-and-budgeting). [Back to the subsystem map](#architecture-and-execution-guide).
 
-**Mechanism.** Logical join rules swap inner-join inputs and reassociate compatible joins, producing equivalent join trees in the memo. Cascades costs the alternatives rather than selecting one greedy rewrite.
-
-**Example.** `(orders JOIN customers) JOIN regions` can be represented with a different inner-join order for costing.
-
-**Why here.** The active path needs this step to compare inner-join trees whose input order changes work.
-
-**Tradeoffs.** Each additional join can enlarge candidates. Rewrites apply only to supported join types and rule bindings.
-
-**Code and ownership.** [`optd-datafusion-repr/src/rules/joins.rs#L28`](optd-datafusion-repr/src/rules/joins.rs#L28) (`apply_join_commute`); [`optd-datafusion-repr/src/rules/joins.rs#L112`](optd-datafusion-repr/src/rules/joins.rs#L112) (`apply_join_assoc`). Origin: inherited.
-</details>
-
-<a id="technique-filter-pushdown"></a>
-
-<details>
-<summary>Predicate classification and filter pushdown</summary>
-
-**Mechanism.** The rule classifies conjuncts by referenced input columns. It pushes left-only or right-only conditions below an inner join, retains cross-input conditions at the join, and has separate transpose rules for sort and aggregate. The fixture asserts scan-adjacent filters.
-
-**Example.** A predicate on `orders.amount` can move beneath a join that also reads customers and regions.
-
-**Why here.** The active path needs this step to reduce rows before later joins when dependencies allow movement.
-
-**Tradeoffs.** Movement depends on join type and expression dependencies. Pushdown changes filter placement, not fallback selectivity accuracy.
-
-**Code and ownership.** [`optd-datafusion-repr/src/rules/filter_pushdown.rs#L66`](optd-datafusion-repr/src/rules/filter_pushdown.rs#L66) (`determine_join_cond_dep`); [`optd-datafusion-repr/src/rules/filter_pushdown.rs#L183`](optd-datafusion-repr/src/rules/filter_pushdown.rs#L183) (`filter_join_transpose`). Origin: inherited.
-</details>
-
-<a id="technique-projection-transposition"></a>
-
-<details>
-<summary>Projection merging and transposition</summary>
-
-**Mechanism.** Projection rules compose column mappings, merge adjacent projections, and transpose projections across filters or joins when referenced columns can be remapped. They preserve required columns while changing plan placement.
-
-**Example.** A filter on a projected column is rewritten against the input column and placed below a projection when its mapping is valid.
-
-**Why here.** The active path needs this step to remove redundant projection work and expose eligible predicates.
-
-**Tradeoffs.** Mappings that cannot be represented safely decline the rewrite. Required parent expressions can keep intermediate columns.
-
-**Code and ownership.** [`optd-datafusion-repr/src/rules/project_transpose/project_transpose_common.rs#L21`](optd-datafusion-repr/src/rules/project_transpose/project_transpose_common.rs#L21) (`ProjectionMapping`); [`optd-datafusion-repr/src/rules/project_transpose/project_filter_transpose.rs#L93`](optd-datafusion-repr/src/rules/project_transpose/project_filter_transpose.rs#L93) (`apply_filter_project_transpose`). Origin: inherited.
-</details>
-
-<a id="technique-physical-implementation"></a>
-
-<details>
-<summary>Physical operator implementation alternatives</summary>
-
-**Mechanism.** Implementation rules map logical scans, projections, filters, sorts, aggregates, limits, and joins to physical nodes. Join rules offer hash and nested-loop implementations when keys and predicates qualify.
-
-**Example.** A logical equijoin can yield a physical hash-join candidate for costing.
-
-**Why here.** The active path needs this step to turn logical operators into DataFusion-executable candidates.
-
-**Tradeoffs.** Only implemented supported shapes become candidates. A candidate name does not prove it wins or performs better.
-
-**Code and ownership.** [`optd-datafusion-repr/src/rules/physical.rs#L14`](optd-datafusion-repr/src/rules/physical.rs#L14) (`PhysicalConversionRule`); [`optd-datafusion-repr/src/rules/joins.rs#L149`](optd-datafusion-repr/src/rules/joins.rs#L149) (`apply_hash_join`). Origin: inherited.
 </details>
 
 <a id="technique-cost-based-winner-selection"></a>
@@ -271,7 +270,137 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** Estimates are not measured runtime. The skewed fixture is not modeled as skewed by fallback estimates, so a chosen plan is not guaranteed optimal.
 
 **Code and ownership.** [`optd-core/src/cascades/tasks2.rs#L408`](optd-core/src/cascades/tasks2.rs#L408) (`gather_statistics_and_costs`); [`optd-datafusion-repr/src/cost/base_cost.rs#L19`](optd-datafusion-repr/src/cost/base_cost.rs#L19) (`DfCostModel`). Origin: mixed.
+
+
+**Used in.** [Cascades search and budgeting](#subsystem-cascades-search-and-budgeting), [Cost and properties](#subsystem-cost-and-properties). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
+
+<a id="subsystem-relational-rewrites-and-implementation"></a>
+
+### 3. Relational rewrites and implementation
+
+[Back to the subsystem map](#architecture-and-execution-guide).
+
+**Code.** [`optd-datafusion-repr/src/rules/joins.rs`](optd-datafusion-repr/src/rules/joins.rs), [`optd-datafusion-repr/src/rules/filter_pushdown.rs`](optd-datafusion-repr/src/rules/filter_pushdown.rs), [`optd-datafusion-repr/src/rules/project_transpose/project_transpose_common.rs`](optd-datafusion-repr/src/rules/project_transpose/project_transpose_common.rs), [`optd-datafusion-repr/src/rules/project_transpose/project_filter_transpose.rs`](optd-datafusion-repr/src/rules/project_transpose/project_filter_transpose.rs), [`optd-datafusion-repr/src/rules/physical.rs`](optd-datafusion-repr/src/rules/physical.rs), [`optd-datafusion-repr/src/rules/filter.rs`](optd-datafusion-repr/src/rules/filter.rs), [`optd-datafusion-repr/src/rules/eliminate_limit.rs`](optd-datafusion-repr/src/rules/eliminate_limit.rs), [`optd-datafusion-repr/src/rules/eliminate_duplicated_expr.rs`](optd-datafusion-repr/src/rules/eliminate_duplicated_expr.rs).
+
+**Techniques.** [Join commutation and association](#technique-join-order-rewrites), [Predicate classification and filter pushdown](#technique-filter-pushdown), [Projection merging and transposition](#technique-projection-transposition), [Physical operator implementation alternatives](#technique-physical-implementation), [Predicate and redundant-operator simplification](#technique-expression-and-operator-simplification).
+
+**Related concepts.** [implementation rule](#implementation-rule).
+
+<a id="technique-join-order-rewrites"></a>
+
+<details>
+<summary>Join commutation and association</summary>
+
+**Mechanism.** Logical join rules swap inner-join inputs and reassociate compatible joins, producing equivalent join trees in the memo. Cascades costs the alternatives rather than selecting one greedy rewrite.
+
+**Example.** `(orders JOIN customers) JOIN regions` can be represented with a different inner-join order for costing.
+
+**Why here.** The active path needs this step to compare inner-join trees whose input order changes work.
+
+**Tradeoffs.** Each additional join can enlarge candidates. Rewrites apply only to supported join types and rule bindings.
+
+**Code and ownership.** [`optd-datafusion-repr/src/rules/joins.rs#L28`](optd-datafusion-repr/src/rules/joins.rs#L28) (`apply_join_commute`); [`optd-datafusion-repr/src/rules/joins.rs#L112`](optd-datafusion-repr/src/rules/joins.rs#L112) (`apply_join_assoc`). Origin: inherited.
+
+
+**Used in.** [Relational rewrites and implementation](#subsystem-relational-rewrites-and-implementation). [Back to the subsystem map](#architecture-and-execution-guide).
+
+</details>
+
+<a id="technique-filter-pushdown"></a>
+
+<details>
+<summary>Predicate classification and filter pushdown</summary>
+
+**Mechanism.** The rule classifies conjuncts by referenced input columns. It pushes left-only or right-only conditions below an inner join, retains cross-input conditions at the join, and has separate transpose rules for sort and aggregate. The fixture asserts scan-adjacent filters.
+
+**Example.** A predicate on `orders.amount` can move beneath a join that also reads customers and regions.
+
+**Why here.** The active path needs this step to reduce rows before later joins when dependencies allow movement.
+
+**Tradeoffs.** Movement depends on join type and expression dependencies. Pushdown changes filter placement, not fallback selectivity accuracy.
+
+**Code and ownership.** [`optd-datafusion-repr/src/rules/filter_pushdown.rs#L66`](optd-datafusion-repr/src/rules/filter_pushdown.rs#L66) (`determine_join_cond_dep`); [`optd-datafusion-repr/src/rules/filter_pushdown.rs#L183`](optd-datafusion-repr/src/rules/filter_pushdown.rs#L183) (`filter_join_transpose`). Origin: inherited.
+
+
+**Used in.** [Relational rewrites and implementation](#subsystem-relational-rewrites-and-implementation). [Back to the subsystem map](#architecture-and-execution-guide).
+
+</details>
+
+<a id="technique-projection-transposition"></a>
+
+<details>
+<summary>Projection merging and transposition</summary>
+
+**Mechanism.** Projection rules compose column mappings, merge adjacent projections, and transpose projections across filters or joins when referenced columns can be remapped. They preserve required columns while changing plan placement.
+
+**Example.** A filter on a projected column is rewritten against the input column and placed below a projection when its mapping is valid.
+
+**Why here.** The active path needs this step to remove redundant projection work and expose eligible predicates.
+
+**Tradeoffs.** Mappings that cannot be represented safely decline the rewrite. Required parent expressions can keep intermediate columns.
+
+**Code and ownership.** [`optd-datafusion-repr/src/rules/project_transpose/project_transpose_common.rs#L21`](optd-datafusion-repr/src/rules/project_transpose/project_transpose_common.rs#L21) (`ProjectionMapping`); [`optd-datafusion-repr/src/rules/project_transpose/project_filter_transpose.rs#L93`](optd-datafusion-repr/src/rules/project_transpose/project_filter_transpose.rs#L93) (`apply_filter_project_transpose`). Origin: inherited.
+
+
+**Used in.** [Relational rewrites and implementation](#subsystem-relational-rewrites-and-implementation). [Back to the subsystem map](#architecture-and-execution-guide).
+
+</details>
+
+<a id="technique-physical-implementation"></a>
+
+<details>
+<summary>Physical operator implementation alternatives</summary>
+
+**Mechanism.** Implementation rules map logical scans, projections, filters, sorts, aggregates, limits, and joins to physical nodes. Join rules offer hash and nested-loop implementations when keys and predicates qualify.
+
+**Example.** A logical equijoin can yield a physical hash-join candidate for costing.
+
+**Why here.** The active path needs this step to turn logical operators into DataFusion-executable candidates.
+
+**Tradeoffs.** Only implemented supported shapes become candidates. A candidate name does not prove it wins or performs better.
+
+**Code and ownership.** [`optd-datafusion-repr/src/rules/physical.rs#L14`](optd-datafusion-repr/src/rules/physical.rs#L14) (`PhysicalConversionRule`); [`optd-datafusion-repr/src/rules/joins.rs#L149`](optd-datafusion-repr/src/rules/joins.rs#L149) (`apply_hash_join`). Origin: inherited.
+
+
+**Used in.** [Relational rewrites and implementation](#subsystem-relational-rewrites-and-implementation). [Back to the subsystem map](#architecture-and-execution-guide).
+
+</details>
+
+<a id="technique-expression-and-operator-simplification"></a>
+
+<details>
+<summary>Predicate and redundant-operator simplification</summary>
+
+**Mechanism.** Filter rules simplify boolean predicates and remove filters that become true. Separate rules remove limits with no effective skip or fetch and collapse duplicated sort or aggregate expressions.
+
+**Example.** A filter whose simplified condition is `TRUE` can be removed; a no-op limit can return its child plan.
+
+**Why here.** These rewrites reduce redundant logical work before Cascades chooses physical operators.
+
+**Tradeoffs.** Each rule handles specific expression and operator shapes. Simplification does not replace general theorem proving or constant folding across unsupported expression forms.
+
+**Code and ownership.** [`optd-datafusion-repr/src/rules/filter.rs#L94`](optd-datafusion-repr/src/rules/filter.rs#L94) (`apply_simplify_filter`); [`optd-datafusion-repr/src/rules/eliminate_limit.rs#L22`](optd-datafusion-repr/src/rules/eliminate_limit.rs#L22) (`apply_eliminate_limit`); [`optd-datafusion-repr/src/rules/eliminate_duplicated_expr.rs#L79`](optd-datafusion-repr/src/rules/eliminate_duplicated_expr.rs#L79) (`apply_eliminate_duplicated_agg_expr`). Origin: inherited.
+
+
+**Used in.** [Relational rewrites and implementation](#subsystem-relational-rewrites-and-implementation). [Back to the subsystem map](#architecture-and-execution-guide).
+
+</details>
+
+<a id="subsystem-cost-and-properties"></a>
+
+### 4. Cost and properties
+
+[Back to the subsystem map](#architecture-and-execution-guide).
+
+**Code.** [`optd-datafusion-repr/src/cost/base_cost.rs`](optd-datafusion-repr/src/cost/base_cost.rs), [`optd-core/src/physical_property.rs`](optd-core/src/physical_property.rs), [`optd-core/src/logical_property.rs`](optd-core/src/logical_property.rs).
+
+**Techniques.** [Physical property interfaces and limits](#technique-required-physical-properties), [Bottom-up logical property derivation](#technique-derived-logical-properties).
+
+**Related concepts.** [memo group](#memo-group), [physical property](#physical-property), [logical property](#logical-property).
+
+**Shared techniques.** [Cost and row-estimate winner selection](#technique-cost-based-winner-selection).
 
 <a id="technique-required-physical-properties"></a>
 
@@ -287,7 +416,42 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** The SQL fixture does not establish general required-property optimization or satisfaction for every plan.
 
 **Code and ownership.** [`optd-core/src/physical_property.rs#L18`](optd-core/src/physical_property.rs#L18) (`PhysicalProperty`). Origin: inherited.
+
+
+**Used in.** [Cost and properties](#subsystem-cost-and-properties). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
+
+<a id="technique-derived-logical-properties"></a>
+
+<details>
+<summary>Bottom-up logical property derivation</summary>
+
+**Mechanism.** A typed builder derives a property from an operator, its predicates, and child properties. The memo-facing adapter erases concrete property types into trait objects. Before calling the typed builder, it downcasts every child property to the expected type, then boxes the derived result for storage.
+
+**Example.** A property builder for a relational operator receives the corresponding properties already derived for its inputs; alternative expressions can reuse the memo representation rather than attach planner-specific concrete types to every API.
+
+**Why here.** The optimizer can store different kinds of logical facts through a common interface while retaining typed implementations of each derivation.
+
+**Tradeoffs.** Type erasure adds runtime downcasts. Supplying the wrong child property type panics at the checked downcast; the interface does not itself establish relational correctness or supply accurate statistics. Logical facts differ from required physical ordering or distribution.
+
+**Code and ownership.** [`LogicalPropertyBuilder` and `derive_any`](optd-core/src/logical_property.rs#L31), inherited optd implementation.
+
+
+
+**Used in.** [Cost and properties](#subsystem-cost-and-properties). [Back to the subsystem map](#architecture-and-execution-guide).
+
+</details>
+
+<a id="subsystem-datafusion-bridge-and-hybrid-planner"></a>
+
+### 5. DataFusion bridge and hybrid planner
+
+[Back to the subsystem map](#architecture-and-execution-guide).
+
+**Code.** [`optd-datafusion-bridge/src/lib.rs`](optd-datafusion-bridge/src/lib.rs), [`optd-datafusion-bridge/src/into_optd.rs`](optd-datafusion-bridge/src/into_optd.rs), [`optd-datafusion-bridge/src/from_optd.rs`](optd-datafusion-bridge/src/from_optd.rs).
+
+**Techniques.** [DataFusion and optd plan conversion](#technique-datafusion-optd-plan-conversion), [DataFusion logical-prepass hybrid](#technique-datafusion-logical-prepass).
 
 <a id="technique-datafusion-optd-plan-conversion"></a>
 
@@ -303,6 +467,10 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** The bridge supports a bounded node and type set. Output naming and conversion limits are documented elsewhere in this README.
 
 **Code and ownership.** [`optd-datafusion-bridge/src/into_optd.rs#L604`](optd-datafusion-bridge/src/into_optd.rs#L604) (`conv_into_optd_plan_node`); [`optd-datafusion-bridge/src/from_optd.rs#L571`](optd-datafusion-bridge/src/from_optd.rs#L571) (`conv_from_optd_plan_node`); [`optd-datafusion-bridge/src/lib.rs#L120`](optd-datafusion-bridge/src/lib.rs#L120) (`create_physical_plan_inner`). Origin: inherited.
+
+
+**Used in.** [DataFusion bridge and hybrid planner](#subsystem-datafusion-bridge-and-hybrid-planner). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
 
 <a id="technique-datafusion-logical-prepass"></a>
@@ -319,7 +487,23 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** This changes the optimizer stack and planning work. Results apply only to the configured arm and query set.
 
 **Code and ownership.** [`optd-datafusion-bridge/src/lib.rs#L326`](optd-datafusion-bridge/src/lib.rs#L326) (`create_df_context`); [`optd-datafusion-bridge/examples/memoir.rs#L206`](optd-datafusion-bridge/examples/memoir.rs#L206) (`benchmark`). Origin: mixed.
+
+
+**Used in.** [DataFusion bridge and hybrid planner](#subsystem-datafusion-bridge-and-hybrid-planner), [Memoir fixture and parity driver](#subsystem-memoir-fixture-and-parity-driver). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
+
+<a id="subsystem-memoir-fixture-and-parity-driver"></a>
+
+### 6. Memoir fixture and parity driver
+
+[Back to the subsystem map](#architecture-and-execution-guide).
+
+**Code.** [`optd-datafusion-bridge/examples/memoir.rs`](optd-datafusion-bridge/examples/memoir.rs).
+
+**Techniques.** [Ordered typed result parity verification](#technique-result-parity-and-plan-evidence).
+
+**Shared techniques.** [DataFusion logical-prepass hybrid](#technique-datafusion-logical-prepass).
 
 <a id="technique-result-parity-and-plan-evidence"></a>
 
@@ -335,6 +519,10 @@ Scope: these cards cover the active `memoir` optimizer, DataFusion bridge, and f
 **Tradeoffs.** Parity proves the exercised inputs and checks, not all SQL semantics, plan optimality, or production readiness. Value comparison uses array formatting.
 
 **Code and ownership.** [`optd-datafusion-bridge/examples/memoir.rs#L17`](optd-datafusion-bridge/examples/memoir.rs#L17) (`rows`); [`optd-datafusion-bridge/examples/memoir.rs#L80`](optd-datafusion-bridge/examples/memoir.rs#L80) (`main`). Origin: extension.
+
+
+**Used in.** [Memoir fixture and parity driver](#subsystem-memoir-fixture-and-parity-driver). [Back to the subsystem map](#architecture-and-execution-guide).
+
 </details>
 
 ## Run
@@ -388,6 +576,7 @@ The default cost model uses fallback table estimates and does not infer fixture 
 The upstream bridge rewrites output field names (for example aliases become col0/col1, aggregates use generic names). Verification compares ordered typed values and expected row counts, retains separate actual/reference displays, and does not claim alias preservation. Empty results exercise zero rows; they do not prove physical schema equality when either engine emits no batches.
 
 The new example denies Clippy warnings in its source. The no-deps Clippy command reports inherited bridge warnings; strict workspace Clippy on Rust 1.99.1 also fails on pre-existing upstream lints. The original upstream CI is preserved; the separate optimizer workflow exercises the local SQL acceptance path.
+
 ## Reproduce optimizer measurements
 
 The [typed-result benchmark](docs/benchmarks/2026-10-22-typed-baseline.md) reports all five queries at all three data sizes. On a four-logical-CPU AMD EPYC 9V74 Ubuntu runner, the million-order aggregate took 25.350 ms [25.262, 25.549] through optd versus 50.680 ms [44.784, 55.704] through DataFusion, including planning. The selective join instead took 5.023 ms [4.948, 5.112] versus 3.120 ms [2.441, 3.223]. Values are medians and min/max of five alternating pairs using the observed Rust 1.99.0 release toolchain. All 180 actions passed ordered-value and physical-type parity. The artifact retains optimizer overhead, plan regressions and incomplete estimates; no general optimizer speedup or cardinality-quality claim follows. The complete million-order process peaked at 240,124 KiB RSS across both sides and all queries.
@@ -397,20 +586,3 @@ Build `cargo +1.99.1 build --release --locked -p optd-datafusion-bridge --exampl
 Five alternating optd/DataFusion pairs per query retain planning, execution and combined duration, exact result parity, executed plans with operator metrics, estimates, runner details and resources. Both sides use four target partitions and batch size 8192. Fixtures have 80% of orders assigned to customer zero. Fixture construction and output formatting are outside the timers, so the result covers an in-memory SQL consumer. The summary rejects missing or duplicate repetitions and distinguishes root plan statistics from optd's internal estimates. No optimizer benefit is established by the setup smoke check.
 
 The optional `--benchmark-hybrid` command adds the bridge's existing DataFusion logical prepass as a separately labeled `optd_df_logical` arm. In the [full three-arm run](docs/benchmarks/2026-10-22-hybrid.md), the million-order selective join took 2.617 [2.602,2.687] ms with the prepass, versus standalone optd 4.660 [4.582,4.726] and DataFusion 2.957 [2.692,2.980]. Executed plans confirm a derived order filter reduces join input from 1m to 10k rows. Extra planning made the hybrid slower than standalone on every other size/query combination; the million-order aggregate took 27.779 [27.498,27.974] versus 24.629 [24.498,24.733] ms. These are five reversed-order totals on a four-logical-CPU AMD EPYC 7763 Ubuntu runner with Rust 1.99.1. All 270 actions passed typed parity; the whole three-arm million-order process peaked at 261,248 KiB RSS. Root estimates remain poor. The report retains all 15 cases, planning/execution costs, resources and raw artifacts. This is a different configured optimizer stack. The [hybrid workflow](.github/workflows/benchmark-hybrid.yml) defaults to a correctness smoke; `smoke=false` runs the full matrix and `summarize_benchmark.py OUTPUT --hybrid` requires all 45 groups.
-
-<a id="technique-derived-logical-properties"></a>
-
-<details>
-<summary>Bottom-up logical property derivation</summary>
-
-**Mechanism.** A typed builder derives a property from an operator, its predicates, and child properties. The memo-facing adapter erases concrete property types into trait objects. Before calling the typed builder, it downcasts every child property to the expected type, then boxes the derived result for storage.
-
-**Example.** A property builder for a relational operator receives the corresponding properties already derived for its inputs; alternative expressions can reuse the memo representation rather than attach planner-specific concrete types to every API.
-
-**Why here.** The optimizer can store different kinds of logical facts through a common interface while retaining typed implementations of each derivation.
-
-**Tradeoffs.** Type erasure adds runtime downcasts. Supplying the wrong child property type panics at the checked downcast; the interface does not itself establish relational correctness or supply accurate statistics. Logical facts differ from required physical ordering or distribution.
-
-**Code and ownership.** [`LogicalPropertyBuilder` and `derive_any`](optd-core/src/logical_property.rs#L31), inherited optd implementation.
-
-</details>
