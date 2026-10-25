@@ -13,6 +13,353 @@ This project preserves the complete [CMU optd-original](https://github.com/cmu-d
 
 ## Architecture and execution guide
 
+<!-- execution-flow:start -->
+### Execution flow
+
+Start with the primary path, then expand a detailed workflow. Select a numbered node to see its operation, implementation techniques, and source. Solid arrows show the named control, data, or lifecycle handoff; dotted arrows show error paths. Separate entry points are named in each workflow.
+
+<a id="review-walkthrough"></a>
+
+#### Walk through one concrete example
+
+Run a supported SELECT over the local skewed memoir fixture and inspect the optd physical plan and ordered results.
+
+**Trace.** [Seed fixture and query set](#flow-step-fixture) → [Convert supported logical plan into optd nodes](#flow-step-to-optd) → [Insert expressions into Cascades memo groups](#flow-step-memo) → [Explore logical rules within configured budgets](#flow-step-explore) → [Add physical implementations](#flow-step-implement) → [Derive candidate statistics, cost, and property feasibility](#flow-step-cost) → [Select memo group winners](#flow-step-winner).
+
+**Result and boundary.** Cascades selects a costed physical winner for the supported plan; unsupported DDL, DML, and empty relations are delegated to DataFusion, and the fixture checks ordered typed result parity.
+
+<details>
+<summary>Implementation decisions to explain</summary>
+
+**Why convert the supported DataFusion plan into optd nodes before memo exploration?** The bridge lets the fixture exercise optd's memo and rules while retaining DataFusion at the boundary; conversion errors propagate, and unsupported plan kinds use the explicit fallback.
+
+[DataFusion and optd plan conversion](#technique-datafusion-optd-plan-conversion) · [Cascades memo groups and expression sharing](#technique-cascades-memo).
+
+**Why gate exploration with configured budgets?** Rule tasks can multiply alternatives, so configured limits bound search work; the tradeoff is that a budget can stop exploration before every alternative is considered.
+
+[Cascades rule exploration and implementation](#technique-cascades-rule-exploration) · [Rule exploration budgets](#technique-search-budget-gates).
+
+</details>
+
+#### Primary execution flow
+
+Default memoir diagnostic disables DataFusion logical optimization. Cascades iterates transformation and implementation rules under budgets; these are rule branches, not mandatory serial phases. Candidate costing invokes the configured base cost model.
+
+```mermaid
+flowchart TD
+    n1["1. Seed fixture and query set"]
+    click n1 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-fixture" "Open step, techniques, and source" _top
+    n3["3. Convert supported logical<br/>plan into optd nodes"]
+    click n3 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-to-optd" "Open step, techniques, and source" _top
+    n4["4. Insert expressions into<br/>Cascades memo groups"]
+    click n4 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-memo" "Open step, techniques, and source" _top
+    n5["5. Explore logical rules within<br/>configured budgets"]
+    click n5 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-explore" "Open step, techniques, and source" _top
+    n6["6. Generate relational<br/>alternatives"]
+    click n6 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-rewrite" "Open step, techniques, and source" _top
+    n7["7. Add physical implementations"]
+    click n7 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-implement" "Open step, techniques, and source" _top
+    n8["8. Derive candidate statistics,<br/>cost, and property feasibility"]
+    click n8 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-cost" "Open step, techniques, and source" _top
+    n9["9. Select memo group winners"]
+    click n9 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-winner" "Open step, techniques, and source" _top
+    n10["10. Convert selected physical<br/>expression back to DataFusion"]
+    click n10 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-from-optd" "Open step, techniques, and source" _top
+    n11["11. Execute and compare ordered<br/>typed results"]
+    click n11 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-execute-parity" "Open step, techniques, and source" _top
+    n12["12. Delegate DDL, DML, and empty<br/>relations to DataFusion"]
+    click n12 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-fallback" "Open step, techniques, and source" _top
+    n13["13. Estimate rows and operator<br/>cost using fallback model"]
+    click n13 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-cost-model" "Open step, techniques, and source" _top
+    n3 -->|"converted root expression"| n4
+    n4 -->|"root group search"| n5
+    n5 -->|"rule bindings"| n6
+    n7 -->|"physical alternatives"| n8
+    n8 -->|"candidate costs"| n9
+    n9 -->|"selected physical expression"| n10
+    n10 -->|"DataFusion execution plan"| n11
+    n1 -->|"input is DDL, DML, or EmptyRelation"| n12
+    n8 -->|"invoke configured estimate model"| n13
+    n1 -->|"default diagnostic disables DataFusion<br/>logical rules"| n3
+    n5 -->|"matching implementation rule during<br/>optimization"| n7
+    n6 -->|"new logical alternatives searched<br/>recursively"| n5
+```
+
+**Detailed workflows.** [optd hybrid planning and execution](#flow-workflow-optd-planning) · [Reference execution and parity check](#flow-workflow-reference-parity) · [Optional hybrid logical prepass](#flow-workflow-hybrid-logical-prepass) · [Generic heuristic physical property enforcement](#flow-workflow-generic-physical-property-enforcement).
+
+<a id="flow-workflow-optd-planning"></a>
+
+<details>
+<summary>optd hybrid planning and execution</summary>
+
+Default memoir diagnostic disables DataFusion logical optimization. Cascades iterates transformation and implementation rules under budgets; these are rule branches, not mandatory serial phases. Candidate costing invokes the configured base cost model.
+
+```mermaid
+flowchart TD
+    n1["1. Seed fixture and query set"]
+    click n1 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-fixture" "Open step, techniques, and source" _top
+    n3["3. Convert supported logical<br/>plan into optd nodes"]
+    click n3 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-to-optd" "Open step, techniques, and source" _top
+    n4["4. Insert expressions into<br/>Cascades memo groups"]
+    click n4 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-memo" "Open step, techniques, and source" _top
+    n5["5. Explore logical rules within<br/>configured budgets"]
+    click n5 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-explore" "Open step, techniques, and source" _top
+    n6["6. Generate relational<br/>alternatives"]
+    click n6 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-rewrite" "Open step, techniques, and source" _top
+    n7["7. Add physical implementations"]
+    click n7 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-implement" "Open step, techniques, and source" _top
+    n8["8. Derive candidate statistics,<br/>cost, and property feasibility"]
+    click n8 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-cost" "Open step, techniques, and source" _top
+    n9["9. Select memo group winners"]
+    click n9 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-winner" "Open step, techniques, and source" _top
+    n10["10. Convert selected physical<br/>expression back to DataFusion"]
+    click n10 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-from-optd" "Open step, techniques, and source" _top
+    n11["11. Execute and compare ordered<br/>typed results"]
+    click n11 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-execute-parity" "Open step, techniques, and source" _top
+    n12["12. Delegate DDL, DML, and empty<br/>relations to DataFusion"]
+    click n12 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-fallback" "Open step, techniques, and source" _top
+    n13["13. Estimate rows and operator<br/>cost using fallback model"]
+    click n13 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-cost-model" "Open step, techniques, and source" _top
+    n3 -->|"converted root expression"| n4
+    n4 -->|"root group search"| n5
+    n5 -->|"rule bindings"| n6
+    n7 -->|"physical alternatives"| n8
+    n8 -->|"candidate costs"| n9
+    n9 -->|"selected physical expression"| n10
+    n10 -->|"DataFusion execution plan"| n11
+    n1 -->|"input is DDL, DML, or EmptyRelation"| n12
+    n8 -->|"invoke configured estimate model"| n13
+    n1 -->|"default diagnostic disables DataFusion<br/>logical rules"| n3
+    n5 -->|"matching implementation rule during<br/>optimization"| n7
+    n6 -->|"new logical alternatives searched<br/>recursively"| n5
+```
+
+</details>
+
+<a id="flow-workflow-reference-parity"></a>
+
+<details>
+<summary>Reference execution and parity check</summary>
+
+The memoir driver independently executes the same SQL through DataFusion reference session and compares its rows/types with the optd result.
+
+```mermaid
+flowchart TD
+    n1["1. Seed fixture and query set"]
+    click n1 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-fixture" "Open step, techniques, and source" _top
+    n11["11. Execute and compare ordered<br/>typed results"]
+    click n11 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-execute-parity" "Open step, techniques, and source" _top
+    n1 -->|"reference SessionContext plan and<br/>execution"| n11
+```
+
+</details>
+
+<a id="flow-workflow-hybrid-logical-prepass"></a>
+
+<details>
+<summary>Optional hybrid logical prepass</summary>
+
+The separate --benchmark-hybrid mode enables DataFusion logical optimization before bridge conversion. Default diagnostic and --benchmark disable that prepass.
+
+```mermaid
+flowchart TD
+    n1["1. Seed fixture and query set"]
+    click n1 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-fixture" "Open step, techniques, and source" _top
+    n2["2. Optionally run DataFusion<br/>logical optimization"]
+    click n2 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-df-logical" "Open step, techniques, and source" _top
+    n3["3. Convert supported logical<br/>plan into optd nodes"]
+    click n3 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-to-optd" "Open step, techniques, and source" _top
+    n1 -->|"--benchmark-hybrid sets<br/>use_df_logical=true"| n2
+    n2 -->|"session logical optimizer output<br/>reaches bridge"| n3
+```
+
+</details>
+
+<a id="flow-workflow-generic-physical-property-enforcement"></a>
+
+<details>
+<summary>Generic heuristic physical property enforcement</summary>
+
+A separate generic optimizer API path retained for the inherited property technique. It is not a Cascades costing stage in the memoir fixture.
+
+```mermaid
+flowchart TD
+    n14["14. Derive and pass required<br/>properties"]
+    click n14 href "https://github.com/STEVVVU/sql-query-optimizer#flow-step-properties" "Open step, techniques, and source" _top
+```
+
+</details>
+
+#### Steps, techniques, and source
+
+These source traces cover the active scope below. They explain implementation behavior; benchmark results and their limits remain in the measurement sections.
+
+<a id="flow-step-fixture"></a>
+
+##### 1. Seed fixture and query set
+
+**Component.** optd-datafusion-bridge/examples/memoir.rs. seed and main establish tables, queries, and the two optimizer contexts used by the diagnostic run.
+
+Fixture setup supplies test input; it is not an optimizer algorithm.
+
+**Source.** [`optd-datafusion-bridge/examples/memoir.rs:96`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-bridge/examples/memoir.rs#L96). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-df-logical"></a>
+
+##### 2. Optionally run DataFusion logical optimization
+
+**Component.** optd-datafusion-bridge/src/lib.rs. The context builder accepts the optd_df_logical flag; when enabled, the bridge applies DataFusion logical optimizers before optd planning.
+
+**Techniques at this step.** [DataFusion logical-prepass hybrid](#technique-datafusion-logical-prepass).
+
+**Source.** [`optd-datafusion-bridge/src/lib.rs:326`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-bridge/src/lib.rs#L326). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-to-optd"></a>
+
+##### 3. Convert supported logical plan into optd nodes
+
+**Component.** optd-datafusion-bridge/src/into_optd.rs. The bridge recursively converts the DataFusion logical plan and expressions; conversion errors propagate to the caller.
+
+**Techniques at this step.** [DataFusion and optd plan conversion](#technique-datafusion-optd-plan-conversion).
+
+**Source.** [`optd-datafusion-bridge/src/into_optd.rs:604`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-bridge/src/into_optd.rs#L604). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-memo"></a>
+
+##### 4. Insert expressions into Cascades memo groups
+
+**Component.** optd-core/src/cascades/memo.rs. The memo interns equivalent expressions, associates child groups, and derives/stores group logical properties.
+
+**Techniques at this step.** [Cascades memo groups and expression sharing](#technique-cascades-memo) · [Bottom-up logical property derivation](#technique-derived-logical-properties).
+
+**Source.** [`optd-core/src/cascades/memo.rs:24`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-core/src/cascades/memo.rs#L24). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-explore"></a>
+
+##### 5. Explore logical rules within configured budgets
+
+**Component.** optd-core/src/cascades/tasks2.rs. Cascades schedules expression and rule tasks, applies enabled rules, and gates further exploration using optimizer limits.
+
+**Techniques at this step.** [Cascades rule exploration and implementation](#technique-cascades-rule-exploration) · [Rule exploration budgets](#technique-search-budget-gates).
+
+**Source.** [`optd-core/src/cascades/tasks2.rs:139`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-core/src/cascades/tasks2.rs#L139). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-rewrite"></a>
+
+##### 6. Generate relational alternatives
+
+**Component.** optd-datafusion-repr/src/rules/joins.rs. Rules commute and associate eligible joins, classify/push filters, transpose projections, simplify filters and eliminate redundant limits or aggregate expressions.
+
+**Techniques at this step.** [Join commutation and association](#technique-join-order-rewrites) · [Predicate classification and filter pushdown](#technique-filter-pushdown) · [Projection merging and transposition](#technique-projection-transposition) · [Predicate and redundant-operator simplification](#technique-expression-and-operator-simplification).
+
+**Source.** [`optd-datafusion-repr/src/rules/joins.rs:112`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-repr/src/rules/joins.rs#L112). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-implement"></a>
+
+##### 7. Add physical implementations
+
+**Component.** optd-datafusion-repr/src/rules/physical.rs. Physical conversion rules provide physical alternatives for supported logical operators; join rules include hash join alternatives.
+
+**Techniques at this step.** [Physical operator implementation alternatives](#technique-physical-implementation).
+
+**Source.** [`optd-datafusion-repr/src/rules/physical.rs:14`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-repr/src/rules/physical.rs#L14). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-cost"></a>
+
+##### 8. Derive candidate statistics, cost, and property feasibility
+
+**Component.** optd-core/src/cascades/tasks2.rs. For each physical expression, search gathers available child winner statistics and calls the configured cost model. It recursively optimizes children with pruning bounds, recomputes total cost and derives statistics before proposing a winner.
+
+**Techniques at this step.** [Cost and row-estimate winner selection](#technique-cost-based-winner-selection) · [Physical property interfaces and limits](#technique-required-physical-properties).
+
+**Source.** [`optd-core/src/cascades/tasks2.rs:408`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-core/src/cascades/tasks2.rs#L408). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-winner"></a>
+
+##### 9. Select memo group winners
+
+**Component.** optd-core/src/cascades/tasks2.rs. After alternatives are costed, Cascades stores winning expressions and their child winners for reconstruction.
+
+**Techniques at this step.** [Cost and row-estimate winner selection](#technique-cost-based-winner-selection).
+
+**Source.** [`optd-core/src/cascades/tasks2.rs:558`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-core/src/cascades/tasks2.rs#L558). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-from-optd"></a>
+
+##### 10. Convert selected physical expression back to DataFusion
+
+**Component.** optd-datafusion-bridge/src/from_optd.rs. The bridge reconstructs the DataFusion physical execution plan from the selected optd plan and metadata; unsupported conversion errors propagate.
+
+**Techniques at this step.** [DataFusion and optd plan conversion](#technique-datafusion-optd-plan-conversion).
+
+**Source.** [`optd-datafusion-bridge/src/from_optd.rs:571`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-bridge/src/from_optd.rs#L571). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-execute-parity"></a>
+
+##### 11. Execute and compare ordered typed results
+
+**Component.** optd-datafusion-bridge/examples/memoir.rs. The fixture executes each SQL query through optd and reference DataFusion contexts, checks schema types and ordered formatted rows, then records plan and memo evidence.
+
+**Techniques at this step.** [Ordered typed result parity verification](#technique-result-parity-and-plan-evidence).
+
+**Source.** [`optd-datafusion-bridge/examples/memoir.rs:105`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-bridge/examples/memoir.rs#L105). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-fallback"></a>
+
+##### 12. Delegate DDL, DML, and empty relations to DataFusion
+
+**Component.** optd-datafusion-bridge/src/lib.rs. The planner explicitly routes DML, DDL, and EmptyRelation plans to DefaultPhysicalPlanner and returns its plan.
+
+**Techniques at this step.** [DataFusion and optd plan conversion](#technique-datafusion-optd-plan-conversion).
+
+**Source.** [`optd-datafusion-bridge/src/lib.rs:125`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-bridge/src/lib.rs#L125). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-cost-model"></a>
+
+##### 13. Estimate rows and operator cost using fallback model
+
+**Component.** optd-datafusion-repr/src/cost/base_cost.rs. DfCostModel computes the fallback operator cost from row estimates and its table statistics; the memoir fixture does not enable advanced cost packages.
+
+**Techniques at this step.** [Cost and row-estimate winner selection](#technique-cost-based-winner-selection).
+
+**Source.** [`optd-datafusion-repr/src/cost/base_cost.rs:19`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-datafusion-repr/src/cost/base_cost.rs#L19). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-properties"></a>
+
+##### 14. Derive and pass required properties
+
+**Component.** optd-core/src/physical_property.rs. The generic heuristic optimizer recursively passes required physical properties to children, derives their output properties and inserts enforcers when needed. This interface is distinct from Cascades candidate costing; tasks2.rs does not call its satisfaction checks.
+
+**Techniques at this step.** [Physical property interfaces and limits](#technique-required-physical-properties).
+
+**Source.** [`optd-core/src/physical_property.rs:18`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-core/src/physical_property.rs#L18) · [`optd-core/src/heuristics/optimizer.rs:201`](https://github.com/STEVVVU/sql-query-optimizer/blob/memoir/optd-core/src/heuristics/optimizer.rs#L201). [Back to execution flow](#execution-flow).
+
+<details>
+<summary>Scope and subsystem coverage</summary>
+
+Memoir fixture and optional DataFusion logical prepass through optd DataFusion conversion, Cascades memo exploration and budgets, relational rewrite and physical implementation rules, cost and logical/physical properties, winner reconstruction, DataFusion execution, and typed ordered-result parity. Includes explicit unsupported-plan fallback.
+
+- **Memo representation.** Memo insertion, expression sharing and property derivation are mapped. [Step 4](#flow-step-memo).
+- **Cascades search and budgeting.** Rule exploration limits and costed winner path are mapped. [Step 5](#flow-step-explore), [Step 8](#flow-step-cost), [Step 9](#flow-step-winner).
+- **Relational rewrites and implementation.** Join, filter, projection, simplification, and physical rule families are mapped. [Step 6](#flow-step-rewrite), [Step 7](#flow-step-implement).
+- **Cost and properties.** Cost estimates and logical/physical property operations are attached to candidate costing. [Step 8](#flow-step-cost), [Step 13](#flow-step-cost-model), [Step 14](#flow-step-properties).
+- **DataFusion bridge and hybrid planner.** Optional prepass, conversions, and implemented unsupported-plan fallback are mapped. [Step 2](#flow-step-df-logical), [Step 3](#flow-step-to-optd), [Step 10](#flow-step-from-optd), [Step 12](#flow-step-fallback).
+- **Memoir fixture and parity driver.** Fixture query execution, row/type parity, and retained plan/memo evidence are mapped. [Step 1](#flow-step-fixture), [Step 11](#flow-step-execute-parity).
+
+Outside this flow audit:
+
+- `datafusion-optd-cli/`. Interactive CLI is not called by memoir fixture.
+- `optd-datafusion-repr-adv-cost/`. Advanced cost packages are not enabled in the fixture arms.
+- `optd-gungnir/`. Statistics sketches are not called by fixture optimizer configuration.
+- `README.upstream.md`. Attribution/overview, not active runtime implementation.
+
+</details>
+
+<!-- execution-flow:end -->
+
+<details>
+<summary>Subsystem technique index</summary>
+
 ### Subsystem map
 
 Select a subsystem in the diagram to open its techniques, tradeoffs, and code references. The numbered links provide the same navigation. This map groups components; the execution diagrams show their runtime flow.
@@ -44,6 +391,8 @@ flowchart LR
 The retained workspace supplies the optimizer and DataFusion integration. The local `memoir` example adds fixture setup, result parity, retained diagnostics, and an explicit hybrid comparison. DataFusion parses and executes SQL; optd searches for a physical plan. The hybrid arm keeps DataFusion's logical optimizer before optd, including filter propagation for selective joins. The skewed fixture does not make fallback cost estimates skew-aware.
 
 The first diagram shows the example boundary. Both optimized and reference queries execute through DataFusion.
+
+</details>
 
 <details>
 <summary>Expand flow diagram 1</summary>
